@@ -26,6 +26,8 @@
 
 ## 快速启动
 
+需要连同数据库一键启动时，使用 [app 仓库部署入口](https://github.com/jiangyi3265/xinrui-tea-app/blob/main/deploy/README.md)：`bash deploy/deploy.sh`。本仓库 Dockerfile 构建静态后台，通过 Nginx 将 `/prod-api` 转发到真实 Java 服务、将 `/h5` 转发到商城资源。默认后台端口为 18001，首次随机密码保存在部署机器的私密文件，不写入仓库。
+
 前置：Node.js 22+ 和 npm，关联后端已经启动。依赖以 package-lock.json 为准。
 
 ```bash

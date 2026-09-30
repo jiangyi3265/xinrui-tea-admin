@@ -1,0 +1,16 @@
+.git
+node_modules
+dist
+unpackage
+.local
+.env*
+!.env*.example
+.idea
+.vscode
+**/*.log
+**/*.pem
+**/*.key
+**/*.p12
+**/*.jks
+backups
+uploads
