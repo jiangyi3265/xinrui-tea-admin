@@ -5,6 +5,10 @@
       <el-form-item label="查找"><el-input v-model="query.keyword" clearable placeholder="订单号、会员或商品" @keyup.enter="search" /></el-form-item>
       <el-form-item><el-button type="primary" icon="Search" @click="search">查询</el-button><el-button icon="Refresh" @click="load">刷新</el-button></el-form-item>
     </el-form>
+    <el-row v-if="resource === 'warehouse' || resource === 'ledger'" class="mb8">
+      <span v-if="resource === 'warehouse'" v-hasPermi="['tea:warehouse:edit']"><el-button type="warning" icon="Switch" :loading="saving" @click="consignAll">一键转寄售</el-button></span>
+      <el-button v-if="resource === 'ledger'" type="success" icon="Document" @click="openStatement">对账报表</el-button>
+    </el-row>
     <el-alert v-if="error" :title="error" type="error" :closable="false" class="mb8" />
     <el-table v-loading="loading" :data="rows" border stripe empty-text="暂无业务记录，用户提交后会出现在这里">
       <el-table-column type="expand"><template #default="{ row }"><pre class="record-detail">{{ detail(row) }}</pre></template></el-table-column>
@@ -31,12 +35,33 @@
       <el-form label-position="top" class="content-form" @submit.prevent="saveContent">
         <template v-if="editor.id === 'business'">
           <el-form-item v-for="field in ruleFields" :key="field.key" :label="field.label"><el-input-number v-model="business[field.key]" :min="0" :max="field.max" :precision="2" /></el-form-item>
+          <h3>抢购与寄售</h3>
+          <el-form-item v-for="field in timeFields" :key="field.key" :label="field.label"><el-input v-model="business[field.key]" maxlength="5" placeholder="HH:mm，如 09:30" style="width:160px" /></el-form-item>
+          <el-form-item v-for="field in scheduleFields" :key="field.key" :label="field.label"><el-input-number v-model="business[field.key]" :min="field.min" :max="field.max" :precision="field.precision" /></el-form-item>
           <h3>会员等级</h3><el-form-item v-for="(level,index) in business.levels" :key="index" :label="'等级 ' + (index + 1)"><el-input v-model="level.name" placeholder="等级名称" /><el-input-number v-model="level.minimumSpend" :min="0" :precision="2" aria-label="累计收货消费门槛" /><span>累计收货消费门槛（元）</span><el-button v-if="business.levels.length > 1" @click="business.levels.splice(index,1)">移除</el-button></el-form-item><el-button @click="business.levels.push({ name: '', minimumSpend: 0 })">添加等级</el-button>
         </template>
         <el-form-item v-else :label="editor.id + ' · JSON 内容'"><el-input v-model="editor.text" type="textarea" :rows="22" aria-label="JSON 内容" /></el-form-item>
         <el-button type="primary" :loading="saving" @click="saveContent">保存</el-button>
         <el-button @click="editor.open = false">取消</el-button>
       </el-form>
+    </el-drawer>
+    <el-drawer v-model="statement.open" title="对账报表" size="78%">
+      <el-form :inline="true" @submit.prevent="loadStatement">
+        <el-form-item label="日期"><el-date-picker v-model="statement.date" type="date" value-format="YYYY-MM-DD" :clearable="false" /></el-form-item>
+        <el-form-item><el-button type="primary" icon="Search" :loading="statement.loading" @click="loadStatement">查询</el-button><el-button type="success" icon="Download" :disabled="!statement.data.rows.length" @click="exportStatement">导出 Excel</el-button></el-form-item>
+      </el-form>
+      <el-alert title="差额 = 当日卖单 − 当日买单；实际收付 = 差额 − 当日买单 × 燃料费率（向下取到分）。备注抵扣请导出后手工填写。" type="info" :closable="false" class="mb8" />
+      <p>总 {{ statement.data.count }} 人（有买卖记录），会员共 {{ statement.data.memberTotal }} 人</p>
+      <el-table v-loading="statement.loading" :data="statement.data.rows" border stripe show-summary :summary-method="statementSummary" empty-text="该日期没有买卖记录">
+        <el-table-column prop="nickName" label="昵称" min-width="120" />
+        <el-table-column prop="prevBuy" :formatter="money" :label="shortDate(statement.data.previousDate) + '买单'" min-width="120" />
+        <el-table-column prop="sell" :formatter="money" :label="shortDate(statement.data.date) + '卖单'" min-width="120" />
+        <el-table-column prop="buy" :formatter="money" :label="shortDate(statement.data.date) + '买单'" min-width="120" />
+        <el-table-column prop="diff" :formatter="money" label="差额" min-width="110" />
+        <el-table-column prop="fuel" :formatter="money" label="燃料费" min-width="100" />
+        <el-table-column prop="actual" :formatter="money" label="实际收付" min-width="120" />
+        <el-table-column prop="remark" label="备注抵扣" min-width="100" />
+      </el-table>
     </el-drawer>
     <el-dialog :model-value="!!preview" title="付款凭证" width="600px" @close="preview = ''"><el-image :src="preview" fit="contain" style="width:100%" /></el-dialog>
     <el-drawer v-model="payout.open" title="登记人工打款" size="460px">
@@ -50,16 +75,18 @@ import { computed, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import request from '@/utils/request'
+import { consignAllTea, getTeaStatement } from '@/api/tea'
+import { downloadXlsx } from '@/utils/xlsx'
 const route = useRoute()
 const resource = computed(() => String(route.query.resource || route.path.split('/').pop()))
 const descriptions = {
-  warehouse: '拍卖与抢购仓库。付款审核、寄卖审核与用户端读取同一份持久化记录。',
+  warehouse: '拍卖与抢购仓库。付款审核、寄卖审核与用户端读取同一份持久化记录。「一键转寄售」会把所有会员已结算的在库商品按原价上浮后上架，不受寄售时间限制。',
   settlements: '核对实际收款及凭证后审核。上传凭证本身不代表收款成功。',
   fees: '寄卖服务费审核。现金凭证通过后，仓库商品才进入寄卖中。',
   recharges: '核对实际收款后审核。通过仅入账一次，驳回不会增加积分。',
   withdrawals: '申请时已冻结金额。审核通过后由财务人工转账，再登记流水号和凭证；驳回会解冻。系统不自动向银行发起打款。',
   reports: '查看用户投诉并记录处理结果。',
-  ledger: '账户余额、积分和上架券的实际增减记录，只读。',
+  ledger: '账户余额、我的利润和燃料费的实际增减记录，只读。「对账报表」按日汇总每位会员的买单、卖单和实际收付，可导出 Excel。',
   bids: '真实出价记录，只读；场次结束、库存和成交单请在拍卖管理中处理。',
   content: '管理现有 H5 内容数据。支付、短信和外部认证未配置时不会模拟成功。'
 }
@@ -73,12 +100,39 @@ const columns = computed(() => {
 const rows = ref([]), total = ref(0), loading = ref(false), saving = ref(false), error = ref(''), preview = ref('')
 const query = reactive({ keyword: '', pageNum: 1, pageSize: 10 })
 const editor = reactive({ open: false, id: '', text: '' })
-const business = reactive({ directRate: 0, indirectRate: 0, consignmentFeeRate: 0, withdrawalFeeRate: 0, withdrawalMinimum: 1, levels: [{ name: '普通会员', minimumSpend: 0 }] })
+const business = reactive({ directRate: 0, indirectRate: 0, consignmentFeeRate: 0, withdrawalFeeRate: 0, withdrawalMinimum: 1, grabStart: '09:30', grabEnd: '09:35', consignStart: '14:30', consignEnd: '17:30', grabLimit: 2, fuelRate: 2, profitRate: 1, consignUpliftRate: 3, registerDailyLimit: 300, levels: [{ name: '普通会员', minimumSpend: 0 }] })
+const timeFields = [{ key: 'grabStart', label: '每日抢购开始时间' }, { key: 'grabEnd', label: '每日抢购结束时间' }, { key: 'consignStart', label: '每日寄售开始时间' }, { key: 'consignEnd', label: '每日寄售结束时间' }]
+const scheduleFields = [{ key: 'grabLimit', label: '每人每次最多抢购（单）', min: 1, max: 100, precision: 0 }, { key: 'fuelRate', label: '燃料费比例（%，抢购时按售价扣除）', min: 0, max: 100, precision: 2 }, { key: 'profitRate', label: '利润比例（%，计入卖方「我的利润」）', min: 0, max: 100, precision: 2 }, { key: 'consignUpliftRate', label: '寄售默认上浮比例（%）', min: 0, max: 100, precision: 2 }, { key: 'registerDailyLimit', label: '每日自助注册人数上限（0 表示关闭自助注册）', min: 0, max: 100000, precision: 0 }]
 const ruleFields = [{ key: 'directRate', label: '直属邀请分佣比例（%）', max: 100 }, { key: 'indirectRate', label: '间接邀请分佣比例（%）', max: 100 }, { key: 'consignmentFeeRate', label: '寄卖服务费比例（%）', max: 100 }, { key: 'withdrawalFeeRate', label: '提现手续费比例（%）', max: 99.99 }, { key: 'withdrawalMinimum', label: '最低提现金额（元）', max: 1000000 }]
 const payout = reactive({ open: false, row: null, bankReference: '', remark: '', voucher: '' })
 function readVoucher(event) { const file = event.target.files[0]; if (!file) return; if (file.size > 1024 * 1024) { ElMessage.error('凭证不能超过1MB'); return } const reader = new FileReader(); reader.onload = () => { payout.voucher = reader.result }; reader.readAsDataURL(file) }
 async function savePayout() { saving.value = true; try { await request({ url: '/admin/tea/withdrawals/' + payout.row.recordId, method: 'put', data: { action: 'paid', memberId: payout.row.memberId, bankReference: payout.bankReference, remark: payout.remark, voucher: payout.voucher } }); payout.open = false; payout.bankReference = ''; payout.remark = ''; payout.voucher = ''; ElMessage.success('打款记录已保存'); await load() } finally { saving.value = false } }
 const contentHelp = computed(() => editor.id === 'categories' ? '分类数组示例：[{"category_id":31,"name":"红茶"}]。编号必须唯一；正在被商品使用的分类不能移除。' : '保持原有字段结构。保存后用户端重新进入页面即可读取；不会改变页面样式。')
+const emptyStatement = () => ({ date: '', previousDate: '', count: 0, memberTotal: 0, totals: {}, rows: [] })
+const statement = reactive({ open: false, loading: false, date: new Date(Date.now() + 8 * 3600000).toISOString().slice(0, 10), data: emptyStatement() })
+const shortDate = value => String(value || '').slice(5)
+const money = (row, column, value) => Number(value ?? 0).toFixed(2)
+async function loadStatement() {
+  statement.loading = true
+  try { const { data } = await getTeaStatement(statement.date); statement.data = data || emptyStatement() } finally { statement.loading = false }
+}
+function openStatement() { statement.open = true; loadStatement() }
+function statementSummary({ columns }) {
+  const totals = statement.data.totals || {}
+  return columns.map((column, index) => index === 0 ? '合计' : totals[column.property] === undefined ? '' : Number(totals[column.property]).toFixed(2))
+}
+function exportStatement() {
+  const d = statement.data, t = d.totals || {}
+  const rows = [['总', d.count + '人'], ['昵称', shortDate(d.previousDate) + '买单', shortDate(d.date) + '卖单', shortDate(d.date) + '买单', '差额', '燃料费', '实际收付', '备注抵扣'],
+    ...d.rows.map(r => [r.nickName, r.prevBuy, r.sell, r.buy, r.diff, r.fuel, r.actual, '']),
+    ['合计', t.prevBuy, t.sell, t.buy, t.diff, t.fuel, t.actual, '']]
+  downloadXlsx('对账报表-' + d.date + '.xlsx', rows, '对账报表', [16, 14, 14, 14, 14, 12, 14, 16])
+}
+async function consignAll() {
+  try { await ElMessageBox.confirm('将把所有会员已结算且未寄售的在库商品，按各自成交价上浮后统一上架寄售，此操作不受寄售时间限制，且无法批量撤回。确认继续？', '一键转寄售', { type: 'warning' }) } catch { return }
+  saving.value = true
+  try { const res = await consignAllTea(); ElMessage.success(res.msg || '已转寄售'); await load() } finally { saving.value = false }
+}
 let sequence = 0
 async function load() {
   const current = ++sequence; loading.value = true; error.value = ''

@@ -19,3 +19,5 @@ export const listTeaAuctions = (params) => request({ url: '/admin/tea/auctions',
 export const addTeaAuction = (data) => request({ url: '/admin/tea/auctions', method: 'post', data })
 export const updateTeaAuction = (id, data) => request({ url: `/admin/tea/auctions/${id}`, method: 'put', data })
 export const cancelTeaAuction = (id) => request({ url: `/admin/tea/auctions/${id}`, method: 'delete' })
+export const consignAllTea = () => request({ url: '/admin/tea/warehouse/consign-all', method: 'put', data: {} })
+export const getTeaStatement = (date) => request({ url: '/admin/tea/ledger', method: 'get', params: { view: 'statement', date } })
